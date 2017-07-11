@@ -1,0 +1,42 @@
+Aus der schnappsideen Kiste: Limited TarBall symlink searcher
+
+This utility tries to follows symlinks in a tar ball.
+The current implementation handles simple redirects and recursive lookups
+just fine. It can deal with file-symlinks and directory symlinks.
+However, It doesn't support anything else than the "ustar  " format. It
+does not have support for hardlinks, longnames or any other extensions.
+Never tested the limit of the implementation, the main idea was that it
+was simple and robust... And frankly, if you need anything more complicated
+then you should ask, if the "tar-balls" is really the best method.
+
+Syntax:
+./tar-sym find|extract file.tar path/to/possibly/symlinked/file
+
+
+How it works:
+
+First, the tool will open the file and generate a "indextable" of all files,
+directories and symlinks of the tar ball (see mapper()).
+
+If the import was successful, the tool will then use the table to follow through
+the given "path/to/possibl..." path (see follow_link()). It does this by splitting
+up the path-string into the individual /path/ tokens. And then walks recursively
+through the directories and symlinks until it reaches the requested "file".
+If the file isn't found it will bail.
+
+At the end, the code will perform the requested operation:
+  "extract" : this will dump the file's content to stdout: (--to-stdout | -O)
+  "find" : returns the real file behind "path/to/possibly/symlinked/file"
+
+Note:
+All tools and techniques are limited to what the most basic OpenWRT/LEDE
+installation has on board. One of those limitation is that busybox's sh does
+not support arrays. Hence, this implementation incorporates dynamic
+metaprogramming to generate a indexed key value store. Don't be fooled
+be the convoluted code, this is much simpler to do, if the programming
+language has a hashmap.
+
+Note2:
+The program currently has a fixed search depth, you can increase the 
+MAX_INDIRECTIONS parameter to go past the limit a bit more. There's no
+loop detection code otherwise, so don't remove it.
