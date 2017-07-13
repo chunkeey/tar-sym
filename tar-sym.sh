@@ -16,23 +16,24 @@
 #
 # Aus der schnappsideen Kiste: Limited TarBall symlink searcher
 #
-# This utility tries to follows symlinks in a tar ball.
+# This utility tries to follows symlinks in a tarball.
 # The current implementation handles simple redirects and recursive lookups
 # just fine. It can deal with file-symlinks and directory symlinks.
-# However, It doesn't support anything else than the "ustar  " format. It
-# does not have support for hardlinks, longnames or any other extensions.
-# Never tested the limit of the implementation, the main idea was that it
+# However, It doesn't support anything else than the "ustar  " format and
+# it can only operate on single volume tar files.
+# It does not have support for hardlinks, longnames or any other extensions.
+# Never tested the limits of the implementation, the main idea was that it
 # was simple and robust... And frankly, if you need anything more complicated
 # then you should ask, if the "tar-balls" is really the best method.
 #
 # Syntax:
-# ./tar-sym.sh find|extract file.tar path/to/possibly/symlinked/file
+# ./tar-sym.sh find|extract|length file.tar path/to/possibly/symlinked/file
 #
 #
 # How it works:
 #
-# First, the tool will open the file and generate a "indextable" of all files,
-# directories and symlinks of the tar ball (see mapper()).
+# First, the tool will open the file and generate a table ("array*") of all files,
+# directories and symlinks listed in the tarball (see mapper()).
 #
 # If the import was successful, the tool will then use the table to follow through
 # the given "path/to/possibl..." path (see follow_link()). It does this by splitting
@@ -43,6 +44,7 @@
 # At the end, the code will perform the requested operation:
 #   "extract" : this will dump the file's content to stdout: (--to-stdout | -O)
 #   "find" : returns the real file behind "path/to/possibly/symlinked/file"
+#   "length"  : returns the length of the stored file
 #
 # Note:
 #
@@ -53,8 +55,12 @@
 # be the convoluted code, this is much simpler to do, if the programming
 # language has a hashmap.
 
-MAX_INDIRECTIONS=${MAX_INDIRECTIONS:-7} # Do not traverse more than 7 levels into a redirection hell
-DEBUG=${DEBUG:-}
+# This bash scripts needs the following external programs
+# echo, dd, printf, wc
+
+# _POSIX_SYMLOOP_MAX is only 7. But we have a
+# recursive loop test, so no problem  Do not traverse more than 7 levels into a redirection hell
+MAX_INDIRECTIONS=${MAX_INDIRECTIONS:-40}
 ${INIT_TRACE:+set -x}
 
 tar_file=
@@ -64,7 +70,7 @@ die() {
 }
 
 help() {
-	die "Syntax: $0 find|extract tarfile.tar path/to/possibly/symlinked/file"
+	die "Syntax: $0 find|extract|length tarfile.tar path/to/possibly/symlinked/file"
 }
 
 dbg() {
@@ -72,7 +78,7 @@ dbg() {
 }
 
 get_tar() {
-	( /bin/dd if="$tar_file" skip="$1" bs=1 count="$2" 2>/dev/null | strings -n 1 | head -1 )
+	( dd if="$tar_file" skip="$1" bs=1 count="$2" 2>/dev/null | strings -n 1 | head -1 )
 }
 
 offset=0
@@ -109,7 +115,7 @@ get_tar_header() {
 
 		# Convert size from the stored octal to decimal
 		# size="$((8#$size))" # Not supported by busybox
-		size=$(/usr/bin/printf '%d' $size)
+		size=$(printf '%d' $size)
 
 		# Pointer to the next entry. 512-Byte aligned.
 		offset=$(( $offset + ( ($size + 511) / 512 + 1) * 512 ))
@@ -120,42 +126,31 @@ get_tar_header() {
                 name="$(get_tar $name_off 100)"
 		tar_finished=0
 	} || {
-		# TAR archieves end on a empty block. So if we fail
-		# to read any values. we can stop
+		# TAR archieves end on at least two consecutive zero-filled blocks.
+		# So if we fail to read any values. we can stop
 		tar_finished=1
 	}
 }
 
-# key-value store
+# the key-value store
 
-ain=0	# current array index
-nai=0	# next array index
-fin=0	# current file index
-nfi=0	# next file index
-din=0	# directory index
-ndi=0	# next directory index
-lin=0	# link index
-nli=0	# next link index
+arrayindex=0		# current array index
+nextarrayindex=0	# next array index
 
 addarray() {
-	ain=$nai
-	eval arrayname_$ain="$1"
-	eval arraytype_$ain="$2"
-	eval arrayindex_$ain="$3"
-	nai=$(($nai+1))
-}
-
-addfile() {
-	fin=$nfi
-	eval filename_$fin="$1"
-	eval fileoffset_$fin="$2"
-	eval filesize_$fin="$3"
-	addarray "$1" 0 "$fin"
-	nfi=$(($nfi+1))
+	arrayindex=$nextarrayindex
+	eval arrayname_$arrayindex="$1"
+	eval arraytype_$arrayindex="$2"
+	eval arrayoffset_$arrayindex="$3"
+	eval arraysize_$arrayindex="$4"
+	eval arraylink_$arrayindex="$5"
+	nextarrayindex=$(($nextarrayindex+1))
 }
 
 lookup_array() {
-	for i in $(seq 0 $ain); do
+	local tmp
+	local i
+	for i in $(seq 0 $arrayindex); do
 		eval tmp="\$arrayname_$i"
 		[ "$tmp" == "$1" ] && {
 			echo -n $i
@@ -164,33 +159,8 @@ lookup_array() {
 	done
 }
 
-lookup_dir() {
-	for i in $(seq 0 $din); do
-		eval tmp="\$dirname_$i"
-		[ "$tmp" == "$1" ] && {
-			echo -n $i
-			break
-		}
-	done
-}
-
 adddir() {
-	local edi=
-	[ $din -gt 0 ] && edi=$(lookup_dir "$1")
-	[ -z $edi ] && {
-		din=$ndi
-		eval dirname_$din="$1"
-		ndi=$(($ndi+1))
-		addarray "$1" 1 "$din"
-	}
-}
-
-addlink() {
-	lin=$nli
-	eval linkname_$lin="$1"
-	eval linklink_$lin="$2"
-	addarray "$1" 2 "$lin"
-	nli=$(($nli+1))
+	[ -z $(lookup_array "$1") ] && addarray "$1" 1 "$2" 0 0 ""
 }
 
 dumparray() {
@@ -198,34 +168,32 @@ dumparray() {
 	for i in $(seq 0 $ain); do
 		eval name="\$arrayname_$i"
 		eval type="\$arraytype_$i"
-		eval index="\$arrayindex_$i"
 
-		dbg ARRAY: i:$i n:$name t:$type ii:$index
+		dbg ARRAY: i:$i n:$name t:$type
 		case "$type" in
 		0)
-			eval filename="\$filename_$index"
-			eval fileoffset="\$fileoffset_$index"
-			eval filesize="\$filesize_$index"
-			dbg "   FILE: $index name: $filename, offset_in_tar:$fileoffset, size_in_tar:$filesize"
+			eval filename="\$arrayname_$i"
+			eval fileoffset="\$arrayoffset_$i"
+			eval filesize="\$arraysize_$i"
+			dbg "   FILE: $i name: $filename, offset_in_tar:$fileoffset, size_in_tar:$filesize"
 			;;
 		1)
-			eval dirname="\$dirname_$index"
-			dbg "    DIR: $index dirname: $dirname"
+			eval dirname="\$arrayname_$i"
+			dbg "    DIR: $i dirname: $dirname"
 
 			;;
 		2)
-			eval linkname="\$linkname_$index"
-			eval linklink="\$linklink_$index"
-			dbg "  LINK: $index linkname: $linkname, linklink:$linklink"
+			eval linkname="\$arrayname_$i"
+			eval linklink="\$arraylink_$i"
+			dbg "  LINK: $i linkname: $linkname, linklink:$linklink"
 			;;
 		esac
 
 	done
 }
 
-stack=
 mapper() {
-	local stack=
+	local dirstack=
 	local cleanname=
 	local saved_offset=
 
@@ -244,26 +212,26 @@ mapper() {
 		cleanname="${cleanname#/}"
 		cleanname="${cleanname#./}"
 
-		dbg "Found $name of type $type"
+		dbg "Found entry '$name' of type '$type'"
 
 		case "$type" in
 		""|\
 		"0")	# File
-			addfile "$cleanname" "$saved_offset" "$size"
+			addarray "$cleanname" 0 "$saved_offset" "$size" ""
 			;;
 		"5")	# Directory
-			stack=""
+			dirstack=""
 			OLDIFS=$IFS;IFS="/";for subdir in $cleanname; do
 				IFS=$OLDIFS
-				[ -z "$stack" ] && adddir "$subdir"
-				[ -z "$stack" ] || adddir "$stack$subdir"
-				stack="$stack$subdir/"
+				[ -z "$dirstack" ] && adddir "$subdir"
+				[ -z "$dirstack" ] || adddir "$dirstack$subdir"
+				dirstack="$dirstack$subdir/"
 			done
 			;;
 		"2")	# Softlink
 			link=${link%/}
 
-			addlink "$cleanname" "$link"
+			addarray "$cleanname" 2 0 0 "$link"
 			;;
 		"*")
 			die "Found unhandled $type"
@@ -275,33 +243,36 @@ mapper() {
 	done
 }
 
-oldstack=
+dirlevel=0
 follow_link() {
-	local le="$2"
-	local li="$1"
-	stack="$3"
-	oldstack="$4"
+	local look="$1"
+	local level="$2"
+	local stack=
 
-        [ "$le" -ge "$MAX_INDIRECTIONS" ] && {
+        [ "$level" -ge "$MAX_INDIRECTIONS" ] && {
                 die "Too many redirections. Giving up."
         }
 
-	dbg "Entered level:$le looking for:$li with base:$stack"
+	dbg "Entered level:$level looking for:$look with base:$stack"
 
-	OLDIFS="$IFS";IFS="/";for pele in $li; do
+	OLDIFS="$IFS";IFS="/";for pele in $look; do
 		IFS="$OLDIFS"
 
+		eval stack="\$stack_$dirlevel"
 		dbg "Look for '$pele' in path: '$stack'"
 
 		case "$pele" in
 		"..")
-			stack=$oldstack
+#			Could be used instead
+#			[ "$dirlevel" -gt 0 ] && dirlevel=$(( $dirlevel - 1 ))
+			[ "$dirlevel" -eq 0 ] && die "Aborting because link '$look' leaves the archive."
+			dirlevel=$(( $dirlevel - 1 ))
 			;;
 		".")
 			;;
 		*)
 			aid=$(lookup_array "$stack$pele")
-			[ -z "$aid" ] && die "'$orig_dest' not found or not a file."
+			[ -z "$aid" ] && die "'$orig_dest' was not found in archive."
 
 			eval type="\$arraytype_$aid"
 
@@ -312,14 +283,14 @@ follow_link() {
 				return
 				;;
 			"1") # Directory
-				oldstack="$stack"
-				stack="$stack$pele/"
+				dirlevel=$(( $dirlevel + 1 ))
+				eval stack_$dirlevel="$stack$pele/"
 				;;
 			"2") # Link
-				eval lid="\$arrayindex_$aid"
-				eval linklink="\$linklink_$lid"
-
-				follow_link "$linklink" $((le + 1)) "$stack" "$oldstack"
+				eval [ -z \$arrayvisited_$aid ] || die "Aborting due to recursive link loop."
+				eval arrayvisited_$aid=1
+				eval linklink="\$arraylink_$aid"
+				follow_link "$linklink" $(( $level + 1 )) "$dirlevel"
 				;;
 			*)
 				die "Internal error"
@@ -331,7 +302,7 @@ follow_link() {
 
 [ "$#" -eq "3" ] || help
 
-[ -r $2 ] || {
+[ -r "$2" ] || {
 	die "file: $2 not accessible"
 }
 
@@ -350,16 +321,24 @@ case "$1" in
 	follow_link "$clean_dest" "0"
 	;;
 
+"length")
+	link=$(follow_link "$clean_dest" "0")
+	[ -z "$link" ] && exit 1
+
+	aid=$(lookup_array "$link")
+	eval echo "\$arraysize_$aid"
+	;;
+
 "extract")
 	link=$(follow_link "$clean_dest" "0")
-	aid=$(lookup_array $link)
+	[ -z "$link" ] && exit 1
 
-	eval fid="\$arrayindex_$aid"
-	eval offset="\$fileoffset_$fid"
-	eval size="\$filesize_$fid"
-
-	/bin/dd if="$tar_file" bs=1 count="$size" skip="$(( $offset + 512 ))" status=none
+	aid=$(lookup_array "$link")
+	eval offset="\$arrayoffset_$aid"
+	eval size="\$arraysize_$aid"
+	dd if="$tar_file" bs=1 count="$size" skip="$(( $offset + 512 ))" status=none
 	;;
+
 *)
 	help
 	;;
